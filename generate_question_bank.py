@@ -2,7 +2,7 @@
 import pandas as pd
 import re
 from odf.opendocument import OpenDocumentText
-from odf.text import P, H, Span
+from odf.text import P, H, Span, LineBreak, Section, PageBreak
 from odf.table import Table, TableRow, TableCell
 from odf.style import Style, TextProperties, ParagraphProperties
 from docx import Document  # for syllabus .docx reading
@@ -13,27 +13,27 @@ import streamlit as st
 def detect_bloom_level(question):
     question = question.lower()
     bloom_keywords = {
-        "Remember": ["define", "list", "name", "state"],
-        "Understand": ["explain", "describe", "summarize", "classify"],
-        "Apply": ["solve", "use", "demonstrate", "compute"],
-        "Analyze": ["compare", "differentiate", "analyze", "distinguish"],
-        "Evaluate": ["justify", "evaluate", "assess", "argue"],
-        "Create": ["design", "develop", "formulate", "construct"]
+        "L1": ["define", "list", "name", "state"],
+        "L2": ["explain", "describe", "summarize", "classify"],
+        "L3": ["solve", "use", "demonstrate", "compute"],
+        "L4": ["compare", "differentiate", "analyze", "distinguish"],
+        "L5": ["justify", "evaluate", "assess", "argue"],
+        "L6": ["design", "develop", "formulate", "construct"]
     }
     for level, verbs in bloom_keywords.items():
         for verb in verbs:
             if verb in question:
                 return level
-    return "Understand"  # default fallback
+    return "L2"  # default fallback
 
 def assign_difficulty(bloom_level):
     return {
-        "Remember": "Low",
-        "Understand": "Low",
-        "Apply": "Medium",
-        "Analyze": "Medium",
-        "Evaluate": "High",
-        "Create": "High"
+        "L1": "Low",
+        "L2": "Low",
+        "L3": "Medium",
+        "L4": "Medium",
+        "L5": "High",
+        "L6": "High"
     }.get(bloom_level, "Medium")
 
 def classify_question_type(question):
@@ -52,6 +52,7 @@ def read_unit_mapping_from_docx(docx_path):
             if match:
                 unit_no, unit_name = match.groups()
                 unit_mapping[unit_no.strip()] = unit_name.strip()
+    print("Extracted Unit Mapping:", unit_mapping)
     return unit_mapping
 
 # ------------------ Main Generator ------------------
@@ -70,11 +71,22 @@ def generate_question_bank_odt(df, unit_mapping, output_path):
 
     for index, row in df.iterrows():
         qno = index + 1
-        bloom = detect_bloom_level(row["Question"])
+        question = str(row.get("Question", ""))
+        unit = str(row.get("Unit", ""))
+        subunit = str(row.get("Subunit", ""))
+        marks = str(row.get("Marks", ""))
+        answer = str(row.get("Answer", ""))
+        teacher_id = str(row.get("Teacher ID", ""))
+
+        if not question:
+            print(f"Skipping row {index+1}: Question field is empty.")
+            continue
+
+        bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
-        qtype = classify_question_type(row["Question"])
-        keyword = extract_keyword(row["Question"])
-        unit_name = unit_mapping.get(str(row["Unit"]), "General")
+        qtype = classify_question_type(question)
+        keyword = extract_keyword(question)
+        unit_name = unit_mapping.get(unit.strip(), "[Unit name not found]")
 
         table = Table(name=f"Question{qno}")
 
@@ -87,28 +99,29 @@ def generate_question_bank_odt(df, unit_mapping, output_path):
                 tr.addElement(cell)
             table.addElement(tr)
 
-        add_row("Q.No", qno)
-        add_row("Question", row["Question"])
-        add_row("Unit", row["Unit"])
-        add_row("Subunit", row["Subunit"])
-        add_row("Marks", row["Marks"])
-        add_row("Difficulty", difficulty)
-        add_row("Answer", row["Answer"])
-        add_row("T/P", qtype)
+        add_row("Question No.", qno)
+        add_row("Question", question)
+        add_row("Unit", f"Unit {unit}")
+        add_row("Subunit", subunit)
+        add_row("Marks", marks)
+        add_row("Difficulty", difficulty[0].upper())
+        add_row("Answer", answer)
+        add_row("Question Type", qtype)
         add_row("Tag", unit_name)
-        add_row("Keyword", keyword)
-        add_row("Bloom", bloom)
-        add_row("CO", "CO1")
-        add_row("Teacher ID", row["Teacher ID"])
-        add_row("Year", "2025")
-        add_row("Year Asked", "2025")
-        add_row("Frequency", "1")
+        add_row("Keywords", keyword)
+        add_row("Blooms Taxonomy", bloom)
+        add_row("Course Outcome", "CO1")
+        add_row("Teacher ID", f"<{teacher_id}>")
+        add_row("Year", "<System updates>")
+        add_row("Year asked", "<System updates>")
+        add_row("Frequency", "<System updates>")
 
         textdoc.text.addElement(table)
-        textdoc.text.addElement(P(text="", stylename=table_style))
+        textdoc.text.addElement(P(text=""))  # page break padding
+        textdoc.text.addElement(P(text="", stylename=table_style))  # second blank for spacing
 
     textdoc.save(output_path)
-    print(f"Question bank generated: {output_path}")
+    print(f"✅ Question bank generated: {output_path}")
 
 # ------------------ Streamlit UI ------------------
 
