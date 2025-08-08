@@ -1,0 +1,23 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.so
+
+# Output files
+*.odt
+*.pdf
+*.docx
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints
+
+# Streamlit
+.streamlit/
+
+# OS system files
+.DS_Store
+Thumbs.db
+
+# Python virtual environments
+venv/
+.env/
