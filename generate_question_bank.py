@@ -45,20 +45,27 @@ def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
 def extract_keyword(question):
-    words = re.findall(r'\b\w{4,}\b', question)
+    keywords = ["chlorine", "coagulation", "disinfection", "aeration", "filtration", 
+                "treatment", "pollution", "pump", "settling", "cyclone", "softening"]
+    question = question.lower()
+    for word in keywords:
+        if word in question:
+            return word
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', question)
     return words[0] if words else "General"
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
     doc = DocxDocument(docx_path)
     for para in doc.paragraphs:
-        if para.text.strip().lower().startswith("unit"):
-            match = re.match(r"Unit\s*(\d+)\s*[:\-]\s*(.*)", para.text.strip(), re.IGNORECASE)
-            if match:
-                unit_no, unit_name = match.groups()
-                unit_mapping[unit_no.strip()] = unit_name.strip()
+        text = para.text.strip()
+        match = re.match(r'^(\d+)\s+(.+)', text)
+        if match:
+            unit_no, unit_name = match.groups()
+            unit_mapping[unit_no.strip()] = unit_name.strip()
     print("Extracted Unit Mapping:", unit_mapping)
     return unit_mapping
+
 
 # ------------------ Generate DOCX ------------------
 def generate_question_bank_docx(df, unit_mapping, output_path):
