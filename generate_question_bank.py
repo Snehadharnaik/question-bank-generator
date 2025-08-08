@@ -1,12 +1,17 @@
 # Required Libraries
 import pandas as pd
 import re
-from odf.opendocument import OpenDocumentText
-from odf.text import P, H, Span, LineBreak, Section, PageBreak
-from odf.table import Table, TableRow, TableCell
-from odf.style import Style, TextProperties, ParagraphProperties
-from docx import Document  # for syllabus .docx reading
+from docx import Document
+from docx.shared import Inches
+from docx.oxml.ns import qn
+from docx.shared import Pt
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.enum.section import WD_SECTION
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.shared import RGBColor
 import streamlit as st
+from docx import Document as DocxDocument
+from docx.shared import Pt
 
 # ------------------ Helper Functions ------------------
 
@@ -24,7 +29,7 @@ def detect_bloom_level(question):
         for verb in verbs:
             if verb in question:
                 return level
-    return "L2"  # default fallback
+    return "L2"
 
 def assign_difficulty(bloom_level):
     return {
@@ -45,7 +50,7 @@ def extract_keyword(question):
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
-    doc = Document(docx_path)
+    doc = DocxDocument(docx_path)
     for para in doc.paragraphs:
         if para.text.strip().lower().startswith("unit"):
             match = re.match(r"Unit\s*(\d+)\s*[:\-]\s*(.*)", para.text.strip(), re.IGNORECASE)
@@ -55,19 +60,10 @@ def read_unit_mapping_from_docx(docx_path):
     print("Extracted Unit Mapping:", unit_mapping)
     return unit_mapping
 
-# ------------------ Main Generator ------------------
-
-def generate_question_bank_odt(df, unit_mapping, output_path):
+# ------------------ Generate DOCX ------------------
+def generate_question_bank_docx(df, unit_mapping, output_path):
     df.fillna("", inplace=True)
-    textdoc = OpenDocumentText()
-
-    table_style = Style(name="TableStyle", family="paragraph")
-    table_style.addElement(ParagraphProperties(numberlines="false", linenumber="0"))
-    textdoc.styles.addElement(table_style)
-
-    text_style = Style(name="TextStyle", family="text")
-    text_style.addElement(TextProperties(fontsize="10pt"))
-    textdoc.styles.addElement(text_style)
+    doc = Document()
 
     for index, row in df.iterrows():
         qno = index + 1
@@ -78,26 +74,26 @@ def generate_question_bank_odt(df, unit_mapping, output_path):
         answer = str(row.get("Answer", ""))
         teacher_id = str(row.get("Teacher ID", ""))
 
-        if not question:
-            print(f"Skipping row {index+1}: Question field is empty.")
-            continue
-
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
         keyword = extract_keyword(question)
         unit_name = unit_mapping.get(unit.strip(), "[Unit name not found]")
 
-        table = Table(name=f"Question{qno}")
+        table = doc.add_table(rows=0, cols=2)
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        table.style = 'Table Grid'
 
         def add_row(label, value):
-            tr = TableRow()
-            for text in [label, str(value)]:
-                cell = TableCell()
-                p = P(stylename=table_style, text=text)
-                cell.addElement(p)
-                tr.addElement(cell)
-            table.addElement(tr)
+            row_cells = table.add_row().cells
+            row_cells[0].text = label
+            row_cells[1].text = str(value)
+            for cell in row_cells:
+                for paragraph in cell.paragraphs:
+                    run = paragraph.runs[0]
+                    font = run.font
+                    font.name = 'Calibri'
+                    font.size = Pt(11)
 
         add_row("Question No.", qno)
         add_row("Question", question)
@@ -116,17 +112,14 @@ def generate_question_bank_odt(df, unit_mapping, output_path):
         add_row("Year asked", "<System updates>")
         add_row("Frequency", "<System updates>")
 
-        textdoc.text.addElement(table)
-        textdoc.text.addElement(P(text=""))  # page break padding
-        textdoc.text.addElement(P(text="", stylename=table_style))  # second blank for spacing
+        doc.add_page_break()
 
-    textdoc.save(output_path)
-    print(f"✅ Question bank generated: {output_path}")
+    doc.save(output_path)
+    print(f"✅ Question bank DOCX generated: {output_path}")
 
 # ------------------ Streamlit UI ------------------
-
 def streamlit_ui():
-    st.title("📚 Question Bank Generator")
+    st.title("📚 Question Bank Generator - DOCX")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
     sfile = st.file_uploader("Upload Syllabus DOCX", type=["docx"])
@@ -135,11 +128,11 @@ def streamlit_ui():
         df = pd.read_csv(qfile)
         unit_map = read_unit_mapping_from_docx(sfile)
 
-        if st.button("Generate Question Bank (.odt)"):
-            out_path = "QuestionBank_Output.odt"
-            generate_question_bank_odt(df, unit_map, out_path)
+        if st.button("Generate Question Bank (.docx)"):
+            out_path = "QuestionBank_Output.docx"
+            generate_question_bank_docx(df, unit_map, out_path)
             with open(out_path, "rb") as f:
-                st.download_button("Download ODT File", f, file_name="QuestionBank_Output.odt")
+                st.download_button("Download DOCX File", f, file_name="QuestionBank_Output.docx")
 
 if __name__ == "__main__":
     streamlit_ui()
