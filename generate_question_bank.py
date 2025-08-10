@@ -4,13 +4,20 @@ import time
 import pandas as pd
 from datetime import datetime
 
-# --- NLP (spaCy) setup with safe fallback ---
+# --- NLP (spaCy) setup with robust auto-download + fallback ---
+import importlib
 try:
     import spacy
     try:
         nlp = spacy.load("en_core_web_sm")
     except Exception:
-        nlp = None
+        # Try auto-download once
+        try:
+            from spacy.cli import download as spacy_download
+            spacy_download("en_core_web_sm")
+            nlp = spacy.load("en_core_web_sm")
+        except Exception:
+            nlp = None
 except Exception:
     nlp = None
 
@@ -269,11 +276,14 @@ def generate_question_bank_docx(df: pd.DataFrame, unit_mapping: dict, output_str
 def streamlit_ui():
     st.title("📚 Question Bank Generator — DOCX with Multi-word Keywords")
 
+    status = "spaCy model loaded ✅" if nlp is not None else "spaCy model NOT available ❌ (using fallback: longest words)"
+    st.caption(status)
+
     st.write("Upload your Questions CSV. Optionally upload a Syllabus DOCX to map Unit numbers → Unit titles (used as Tag when Tag is empty).")
 
     c1, c2 = st.columns(2)
     with c1:
-        qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
+        qfile = st.file_uploader("Upload Questions CSV", type=["csv","xlsx","xls"])
     with c2:
         sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
 
@@ -281,6 +291,7 @@ def streamlit_ui():
     single_char_diff = st.checkbox("Show Difficulty as a single letter (L/M/H)", value=False)
 
     if qfile is not None:
+        # Read CSV/Excel
         try:
             df = pd.read_csv(qfile)
         except Exception:
@@ -288,9 +299,12 @@ def streamlit_ui():
             df = pd.read_excel(qfile)
         df = normalize_columns(df)
 
-        # Quick preview
-        st.subheader("Preview (first 10 rows)")
-        st.dataframe(df.head(10))
+        # Compute and preview keywords LIVE so you can verify
+        preview_df = df.copy()
+        preview_df["_Extracted Keywords"] = preview_df["Question"].astype(str).apply(extract_keywords_from_question)
+
+        st.subheader("Preview (first 12 rows with extracted keywords)")
+        st.dataframe(preview_df.head(12))
 
         unit_map = {}
         if sfile is not None:
@@ -309,8 +323,7 @@ def streamlit_ui():
                 df, unit_map, buffer, bold_keywords=bold_keywords, show_single_char_difficulty=single_char_diff
             )
             buffer.seek(0)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = f"QuestionBank_Output_{timestamp}.docx"
+            fname = f"QuestionBank_Output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
             st.download_button(
                 label="Download DOCX File",
                 data=buffer,
@@ -318,15 +331,17 @@ def streamlit_ui():
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 
-            # Guidance if spaCy wasn't available
             if nlp is None:
-                st.info(
-                    "spaCy model not detected. Keywords were generated using a fallback method.\n"
-                    "For best results, install spaCy and the English model:\n\n"
-                    "pip install spacy\n"
-                    "python -m spacy download en_core_web_sm"
-                )
+                st.error(
+                    "You're currently on the fallback keyword extractor. To get TRUE noun-phrase multi-word keywords, install spaCy model locally and rerun:
 
+"
+                    "pip install spacy
+"
+                    "python -m spacy download en_core_web_sm
+"
+                    "(If running on Streamlit Cloud, add these to your requirements.txt.)"
+                )
 
 if __name__ == "__main__":
     streamlit_ui()
