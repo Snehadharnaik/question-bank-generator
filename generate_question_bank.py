@@ -5,6 +5,7 @@ from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
+import pdfplumber
 
 # ------------------ Helper Functions ------------------
 
@@ -37,12 +38,43 @@ def assign_difficulty(bloom_level):
 def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
-def extract_keyword(question):
-    # Extract most relevant technical keyword (longest significant word)
-    words = re.findall(r'\b[a-zA-Z]{4,}\b', question)
-    stopwords = {"define", "explain", "describe", "summarize", "calculate", "solve", "determine", "find", "list", "name", "state", "using", "with", "from", "into", "which", "that", "this", "about"}
-    keywords = [w for w in words if w.lower() not in stopwords]
-    return keywords[0] if keywords else "General"
+def extract_technical_terms_from_syllabus(syllabus_path):
+    terms = set()
+    if syllabus_path.name.lower().endswith(".docx"):
+        doc = DocxDocument(syllabus_path)
+        for para in doc.paragraphs:
+            words = re.findall(r'\b[a-zA-Z]{4,}\b', para.text)
+            for w in words:
+                terms.add(w.lower())
+    elif syllabus_path.name.lower().endswith(".pdf"):
+        with pdfplumber.open(syllabus_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    words = re.findall(r'\b[a-zA-Z]{4,}\b', text)
+                    for w in words:
+                        terms.add(w.lower())
+    return terms
+
+def extract_keyword(question, technical_terms):
+    stopwords = {
+        "define", "explain", "describe", "summarize", "calculate", "solve", 
+        "determine", "find", "list", "name", "state", "using", "with", "from", 
+        "into", "which", "that", "this", "about", "and", "for", "the", "what"
+    }
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', question.lower())
+
+    # Priority 1: match technical term from syllabus
+    for w in words:
+        if w not in stopwords and w in technical_terms:
+            return w
+
+    # Priority 2: fallback to first meaningful word
+    for w in words:
+        if w not in stopwords:
+            return w
+
+    return "General"
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
@@ -56,7 +88,7 @@ def read_unit_mapping_from_docx(docx_path):
     return unit_mapping
 
 # ------------------ Generate DOCX ------------------
-def generate_question_bank_docx(df, unit_mapping, output_path):
+def generate_question_bank_docx(df, unit_mapping, output_path, technical_terms):
     df.fillna("", inplace=True)
     doc = Document()
 
@@ -74,7 +106,7 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
-        keyword = extract_keyword(question)
+        keyword = extract_keyword(question, technical_terms)
 
         unit_name = unit_mapping.get(unit.strip(), tag if tag else "[Unit name not found]")
 
@@ -116,20 +148,25 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX (No spaCy Model Needed)")
+    st.title("📚 Question Bank Generator - DOCX (Technical Keywords from Syllabus)")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
-    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
+    sfile = st.file_uploader("Upload Syllabus DOCX/PDF (optional)", type=["docx", "pdf"])
+
+    technical_terms = set()
+    unit_map = {}
+
+    if sfile:
+        technical_terms = extract_technical_terms_from_syllabus(sfile)
+        if sfile.name.lower().endswith(".docx"):
+            unit_map = read_unit_mapping_from_docx(sfile)
 
     if qfile:
         df = pd.read_csv(qfile)
-        unit_map = {}
-        if sfile:
-            unit_map = read_unit_mapping_from_docx(sfile)
 
         if st.button("Generate Question Bank (.docx)"):
             out_path = "QuestionBank_Output.docx"
-            generate_question_bank_docx(df, unit_map, out_path)
+            generate_question_bank_docx(df, unit_map, out_path, technical_terms)
             with open(out_path, "rb") as f:
                 st.download_button("Download DOCX File", f, file_name="QuestionBank_Output.docx")
 
