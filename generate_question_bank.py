@@ -1,10 +1,10 @@
-# generate_question_bank.py
 import pandas as pd
 import re
 from docx import Document
 from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
+from docx import Document as DocxDocument
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # ------------------ Helper Functions ------------------
@@ -39,9 +39,13 @@ def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
 def extract_keywords_tfidf(all_questions, idx):
-    """Extract top 1-3 word technical keyword from question using TF-IDF."""
+    """Extract top 1–3 word technical keyword/phrase from question using TF-IDF."""
+    stopwords = {"define", "explain", "describe", "summarize", "calculate", "solve", "determine",
+                 "find", "list", "name", "state", "using", "with", "from", "into", "which",
+                 "that", "this", "about", "and", "for", "the", "a", "an", "by", "on", "in"}
+
     vectorizer = TfidfVectorizer(
-        ngram_range=(1,3),
+        ngram_range=(1, 3),
         stop_words='english',
         token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b',
         max_features=5000
@@ -53,18 +57,31 @@ def extract_keywords_tfidf(all_questions, idx):
         return "General"
 
     tuples = list(zip(row.indices, row.data))
-    tuples.sort(key=lambda x: -x[1])
+    tuples.sort(key=lambda x: -x[1])  # Sort by score
 
     for idx_feature, score in tuples:
         candidate = feature_names[idx_feature]
-        if any(len(w) >= 4 for w in candidate.split()):
-            return candidate
+        words = candidate.split()
+        if any(len(w) >= 4 for w in words) and all(w.lower() not in stopwords for w in words):
+            return candidate  # Best technical phrase
     return "General"
 
+def read_unit_mapping_from_docx(docx_path):
+    unit_mapping = {}
+    doc = DocxDocument(docx_path)
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        match = re.match(r'^(\d+)\s+(.+)', text)
+        if match:
+            unit_no, unit_name = match.groups()
+            unit_mapping[unit_no.strip()] = unit_name.strip()
+    return unit_mapping
+
 # ------------------ Generate DOCX ------------------
-def generate_question_bank_docx(df, output_path):
+def generate_question_bank_docx(df, unit_mapping, output_path):
     df.fillna("", inplace=True)
     doc = Document()
+
     all_questions = df["Question"].astype(str).tolist()
 
     for index, row in df.iterrows():
@@ -81,7 +98,9 @@ def generate_question_bank_docx(df, output_path):
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
-        keyword = extract_keywords_tfidf(all_questions, index)
+        keyword = extract_keywords_tfidf(all_questions, index)  # Improved keyword extraction
+
+        unit_name = tag if tag else unit_mapping.get(unit.strip(), "[Unit name not found]")
 
         table = doc.add_table(rows=0, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -106,7 +125,7 @@ def generate_question_bank_docx(df, output_path):
         add_row("Difficulty", difficulty[0].upper())
         add_row("Answer", answer)
         add_row("Question Type", qtype)
-        add_row("Tag", tag if tag else "[Tag not provided]")
+        add_row("Tag", unit_name)
         add_row("Keywords", keyword)
         add_row("Blooms Taxonomy", bloom)
         add_row("Course Outcome", co if co else "CO1")
@@ -121,16 +140,20 @@ def generate_question_bank_docx(df, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX (TF-IDF Keywords)")
+    st.title("📚 Question Bank Generator - DOCX (Improved Keywords)")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
+    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
 
     if qfile:
         df = pd.read_csv(qfile)
+        unit_map = {}
+        if sfile:
+            unit_map = read_unit_mapping_from_docx(sfile)
 
         if st.button("Generate Question Bank (.docx)"):
             out_path = "QuestionBank_Output.docx"
-            generate_question_bank_docx(df, out_path)
+            generate_question_bank_docx(df, unit_map, out_path)
             with open(out_path, "rb") as f:
                 st.download_button("Download DOCX File", f, file_name="QuestionBank_Output.docx")
 
