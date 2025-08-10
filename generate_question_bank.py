@@ -1,19 +1,20 @@
 import pandas as pd
 import re
+import spacy
 from docx import Document
 from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
-import spacy
 
 # ------------------ Load spaCy model ------------------
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load("en_core_web_sm")
+# This will require 'en_core_web_sm' installed in your environment
+# In Streamlit Cloud, make sure to add in requirements.txt:
+# spacy
+# python-docx
+# pandas
+# And in postBuild or manually run: python -m spacy download en_core_web_sm
+nlp = spacy.load("en_core_web_sm")
 
 # ------------------ Helper Functions ------------------
 
@@ -46,34 +47,32 @@ def assign_difficulty(bloom_level):
 def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
-def extract_keyword(question):
-    """
-    Extracts important 1-3 word technical phrases from the question.
-    """
+def extract_keywords_from_question(question):
+    """Extract 1–3 word technical keywords using noun phrases from the question text."""
     doc = nlp(question)
-    technical_phrases = []
-
+    bloom_verbs = {
+        "define", "list", "name", "state", "explain", "describe", "summarize", "classify",
+        "solve", "use", "demonstrate", "compute", "compare", "differentiate", "analyze",
+        "distinguish", "justify", "evaluate", "assess", "argue", "design", "develop",
+        "formulate", "construct", "determine", "find"
+    }
+    keywords = []
     for chunk in doc.noun_chunks:
-        phrase = chunk.text.strip().lower()
-        # Remove very short or generic words
-        if len(phrase) > 3 and not re.match(r'^(what|which|that|this|these|those|its|their|his|her)$', phrase):
-            # Keep up to 3 words in the phrase
-            words = phrase.split()
-            if 1 <= len(words) <= 3:
-                technical_phrases.append(phrase)
-
-    # If we have phrases, return the longest one, else fallback
-    if technical_phrases:
-        # Remove duplicates while keeping order
-        seen = set()
-        unique_phrases = []
-        for p in technical_phrases:
-            if p not in seen:
-                seen.add(p)
-                unique_phrases.append(p)
-        return ", ".join(unique_phrases[:2])  # return up to 2 phrases
-    else:
-        return "General"
+        phrase = chunk.text.strip()
+        words = phrase.split()
+        if len(words) <= 5 and not all(w.lower() in bloom_verbs for w in words):
+            # Remove common stopwords-only phrases
+            if any(w.isalpha() and len(w) > 2 for w in words):
+                keywords.append(phrase)
+    # Deduplicate while preserving order
+    seen = set()
+    final_keywords = []
+    for kw in keywords:
+        low = kw.lower()
+        if low not in seen:
+            seen.add(low)
+            final_keywords.append(kw)
+    return ", ".join(final_keywords[:3]) if final_keywords else "General"
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
@@ -105,9 +104,9 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
-        keyword = extract_keyword(question)  # now multi-word technical terms
+        keyword = extract_keywords_from_question(question)
 
-        unit_name = tag if tag else unit_mapping.get(unit.strip(), "[Unit name not found]")
+        unit_name = unit_mapping.get(unit.strip(), tag if tag else "[Unit name not found]")
 
         table = doc.add_table(rows=0, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -147,15 +146,15 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX (Multi-word Keywords)")
+    st.title("📚 Question Bank Generator - DOCX with Multi-word Technical Keywords")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
-    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
+    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx", "doc", "pdf"])
 
     if qfile:
         df = pd.read_csv(qfile)
         unit_map = {}
-        if sfile:
+        if sfile and sfile.name.lower().endswith(".docx"):
             unit_map = read_unit_mapping_from_docx(sfile)
 
         if st.button("Generate Question Bank (.docx)"):
