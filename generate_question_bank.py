@@ -10,8 +10,15 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
 
-# Load SpaCy English model
-nlp = spacy.load("en_core_web_sm")
+# Load SpaCy English model (auto-install if missing)
+import subprocess
+import sys
+
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
 
 # ------------------ File Text Extraction ------------------
 
