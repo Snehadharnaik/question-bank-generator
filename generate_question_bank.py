@@ -3,13 +3,17 @@ import pandas as pd
 import re
 import pdfplumber
 import mammoth
+import spacy
 from docx import Document
 from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
 
-# ------------------ Keyword Extraction ------------------
+# Load SpaCy English model
+nlp = spacy.load("en_core_web_sm")
+
+# ------------------ File Text Extraction ------------------
 
 def extract_text_from_file(file_path):
     if file_path.lower().endswith(".docx"):
@@ -29,21 +33,39 @@ def extract_text_from_file(file_path):
     else:
         return ""
 
+# ------------------ Keyword Extraction ------------------
+
 def extract_keywords_from_syllabus(file_path):
     syllabus_text = extract_text_from_file(file_path)
-    words = re.findall(r'\b[a-zA-Z]{4,}\b', syllabus_text.lower())
-    stopwords = {"unit", "subunit", "marks", "course", "outcome", "system",
-                 "water", "the", "and", "with", "for"}
-    return set(words) - stopwords
+    doc = nlp(syllabus_text)
+    terms = set()
+
+    for chunk in doc.noun_chunks:
+        phrase = chunk.text.strip().lower()
+        if len(phrase) > 3 and not phrase.isnumeric():
+            terms.add(phrase)
+
+    return terms
 
 def extract_keyword_from_question(question, syllabus_terms):
-    question_words = re.findall(r'\b[a-zA-Z]{4,}\b', question.lower())
-    for word in question_words:
-        if word in syllabus_terms:
-            return word
-    return question_words[0] if question_words else "General"
+    doc = nlp(question)
 
-# ------------------ Other Helper Functions ------------------
+    # First try: match noun phrases from syllabus
+    for chunk in doc.noun_chunks:
+        phrase = chunk.text.strip().lower()
+        if phrase in syllabus_terms:
+            return phrase
+
+    # Second try: return first noun phrase in question
+    noun_phrases = list(doc.noun_chunks)
+    if noun_phrases:
+        return noun_phrases[0].text.lower()
+
+    # Last fallback: first long word
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', question.lower())
+    return words[0] if words else "general"
+
+# ------------------ Bloom's Taxonomy & Difficulty ------------------
 
 def detect_bloom_level(question):
     question = question.lower()
@@ -86,6 +108,7 @@ def read_unit_mapping_from_docx(docx_path):
     return unit_mapping
 
 # ------------------ Generate DOCX ------------------
+
 def generate_question_bank_docx(df, unit_mapping, syllabus_terms, output_path):
     df.fillna("", inplace=True)
     doc = Document()
@@ -153,6 +176,7 @@ def generate_question_bank_docx(df, unit_mapping, syllabus_terms, output_path):
     doc.save(output_path)
 
 # ------------------ Streamlit UI ------------------
+
 def streamlit_ui():
     st.title("📚 Question Bank Generator - DOCX")
 
@@ -165,16 +189,13 @@ def streamlit_ui():
         unit_map = {}
         syllabus_terms = set()
         if sfile:
-            # Save uploaded syllabus to temp file
             syllabus_path = f"temp_syllabus.{sfile.name.split('.')[-1]}"
             with open(syllabus_path, "wb") as f:
                 f.write(sfile.read())
 
-            # Extract unit mapping if .docx
             if syllabus_path.endswith(".docx"):
                 unit_map = read_unit_mapping_from_docx(syllabus_path)
 
-            # Extract technical terms
             syllabus_terms = extract_keywords_from_syllabus(syllabus_path)
 
         if st.button("Generate Question Bank (.docx)"):
