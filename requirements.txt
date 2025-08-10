@@ -2,5 +2,4 @@ pandas
 python-docx
 streamlit
 pdfplumber
-mammoth
-PyPDF2
+scikit-learn
