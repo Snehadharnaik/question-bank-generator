@@ -7,17 +7,42 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
 
-# ------------------ Load spaCy model ------------------
-# This will require 'en_core_web_sm' installed in your environment
-# In Streamlit Cloud, make sure to add in requirements.txt:
-# spacy
-# python-docx
-# pandas
-# And in postBuild or manually run: python -m spacy download en_core_web_sm
+# Load spaCy model
 nlp = spacy.load("en_core_web_sm")
 
-# ------------------ Helper Functions ------------------
+# ------------------ Keyword Extraction ------------------
+def extract_keywords_from_question(question):
+    """
+    Extracts meaningful technical keywords (1 to 3 words) from the question.
+    """
+    doc = nlp(question)
+    keywords = []
 
+    # Extract noun chunks (multi-word allowed)
+    for chunk in doc.noun_chunks:
+        phrase = chunk.text.strip().lower()
+        # Remove phrases that are too short or generic
+        if len(phrase) > 3 and phrase not in {
+            "this", "that", "which", "these", "those", "something",
+            "someone", "anyone", "anything", "everything", "nothing"
+        }:
+            # Remove leading/trailing stopwords
+            words = [w for w in phrase.split() if w not in nlp.Defaults.stop_words]
+            clean_phrase = " ".join(words)
+            if clean_phrase and clean_phrase not in keywords:
+                keywords.append(clean_phrase)
+
+    # If no noun chunks found, fallback to longest meaningful word
+    if not keywords:
+        words = [w.text.lower() for w in doc if w.is_alpha and not w.is_stop]
+        words = sorted(words, key=len, reverse=True)
+        if words:
+            keywords.append(words[0])
+
+    # Limit to top 3 keywords
+    return ", ".join(keywords[:3]) if keywords else "General"
+
+# ------------------ Bloom's Taxonomy ------------------
 def detect_bloom_level(question):
     question = question.lower()
     bloom_keywords = {
@@ -47,33 +72,7 @@ def assign_difficulty(bloom_level):
 def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
-def extract_keywords_from_question(question):
-    """Extract 1–3 word technical keywords using noun phrases from the question text."""
-    doc = nlp(question)
-    bloom_verbs = {
-        "define", "list", "name", "state", "explain", "describe", "summarize", "classify",
-        "solve", "use", "demonstrate", "compute", "compare", "differentiate", "analyze",
-        "distinguish", "justify", "evaluate", "assess", "argue", "design", "develop",
-        "formulate", "construct", "determine", "find"
-    }
-    keywords = []
-    for chunk in doc.noun_chunks:
-        phrase = chunk.text.strip()
-        words = phrase.split()
-        if len(words) <= 5 and not all(w.lower() in bloom_verbs for w in words):
-            # Remove common stopwords-only phrases
-            if any(w.isalpha() and len(w) > 2 for w in words):
-                keywords.append(phrase)
-    # Deduplicate while preserving order
-    seen = set()
-    final_keywords = []
-    for kw in keywords:
-        low = kw.lower()
-        if low not in seen:
-            seen.add(low)
-            final_keywords.append(kw)
-    return ", ".join(final_keywords[:3]) if final_keywords else "General"
-
+# ------------------ Unit Mapping ------------------
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
     doc = DocxDocument(docx_path)
@@ -104,7 +103,7 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
-        keyword = extract_keywords_from_question(question)
+        keyword = extract_keywords_from_question(question)  # ✅ improved multi-word keywords
 
         unit_name = unit_mapping.get(unit.strip(), tag if tag else "[Unit name not found]")
 
@@ -146,15 +145,15 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX with Multi-word Technical Keywords")
+    st.title("📚 Question Bank Generator - DOCX with Multi-word Keywords")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
-    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx", "doc", "pdf"])
+    sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
 
     if qfile:
         df = pd.read_csv(qfile)
         unit_map = {}
-        if sfile and sfile.name.lower().endswith(".docx"):
+        if sfile:
             unit_map = read_unit_mapping_from_docx(sfile)
 
         if st.button("Generate Question Bank (.docx)"):
