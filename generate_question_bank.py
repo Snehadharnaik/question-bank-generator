@@ -1,32 +1,3 @@
-# =========================
-# Auto-install spaCy + Model
-# =========================
-import subprocess
-import sys
-import importlib
-
-# Ensure spaCy is installed
-try:
-    import spacy
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "spacy==3.7.1"])
-    import spacy
-
-# Ensure the English model is installed
-try:
-    spacy.load("en_core_web_sm")
-except OSError:
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install",
-        "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl"
-    ])
-
-importlib.reload(spacy)
-nlp = spacy.load("en_core_web_sm")
-
-# =========================
-# Rest of your imports
-# =========================
 import pandas as pd
 import re
 from docx import Document
@@ -67,14 +38,11 @@ def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
 def extract_keyword(question):
-    # Use spaCy to find most important technical keyword
-    doc = nlp(question)
-    candidates = [token.text for token in doc if token.pos_ in ["NOUN", "PROPN"] and len(token.text) > 3]
-    if candidates:
-        return candidates[0]
-    # fallback
+    # Extract most relevant technical keyword (longest significant word)
     words = re.findall(r'\b[a-zA-Z]{4,}\b', question)
-    return words[0] if words else "General"
+    stopwords = {"define", "explain", "describe", "summarize", "calculate", "solve", "determine", "find", "list", "name", "state", "using", "with", "from", "into", "which", "that", "this", "about"}
+    keywords = [w for w in words if w.lower() not in stopwords]
+    return keywords[0] if keywords else "General"
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
@@ -148,7 +116,7 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX")
+    st.title("📚 Question Bank Generator - DOCX (No spaCy Model Needed)")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
     sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
