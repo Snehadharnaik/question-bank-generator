@@ -1,347 +1,216 @@
-import io
+"""
+Domain-agnostic multi-word keyword extractor from a single question string.
+
+Strategy (robust, no external config):
+1) Prefer spaCy noun-phrase chunks (with NER heads) → cleaned, 2–6 token phrases.
+2) If spaCy isn't available or finds little, use a RAKE-like heuristic:
+   - Split on stopwords/punctuation to form candidate phrases
+   - Score by degree/frequency + position bonus
+3) Post-process: de-duplicate, strip generic/verb-only phrases, keep hyphens & digits.
+
+Usage:
+    from keyword_extractor import extract_keywords
+    kws = extract_keywords("Briefly describe breakpoint chlorination and chlorine demand", max_keywords=3)
+
+Requires (optional): spaCy with en_core_web_sm (auto-download attempt included).
+
+Author: Amit project – Keyword module
+"""
+
+from __future__ import annotations
 import re
-import time
-import pandas as pd
-from datetime import datetime
+from typing import List, Tuple
 
-# --- NLP (spaCy) setup with robust auto-download + fallback ---
-import importlib
+# --- Optional spaCy load with auto-download ---
 try:
-    import spacy
+    import spacy  # type: ignore
     try:
-        nlp = spacy.load("en_core_web_sm")
+        _NLP = spacy.load("en_core_web_sm")
     except Exception:
-        # Try auto-download once
         try:
-            from spacy.cli import download as spacy_download
-            spacy_download("en_core_web_sm")
-            nlp = spacy.load("en_core_web_sm")
+            from spacy.cli import download as _spacy_download
+            _spacy_download("en_core_web_sm")
+            _NLP = spacy.load("en_core_web_sm")
         except Exception:
-            nlp = None
-except Exception:
-    nlp = None
+            _NLP = None
+except Exception:  # pragma: no cover
+    _NLP = None
 
-from docx import Document
-from docx.shared import Pt
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
+# --- Small, general stoplist ---
+_STOP = set(
+    """
+    a an and are as at be been being but by can cannot could did do does doing done for from had has have having how i if in into is it its it's of on onto or our out per shall should than that the their them then there these they this those to under upon was we were what when where which who whom why will with would you your yours
+    about above after again against all almost also although always among amount
+    because before between both each either enough especially etc few further however
+    including instead least less many more most much neither never often other otherwise
+    same several some such through throughout unless until very via while within without
+    define definition describe explanation explain discuss briefly write list state name give show draw calculate solve determine find compute compare analyze analyse assess evaluate identify demonstrate apply design develop construct create formulate justify argue critique outline summarize classify distinguish examine
+    question answer marks unit subunit co teacher id year frequency keywords blooms taxonomy course outcome tag type
+    """.split()
+)
 
-import streamlit as st
-
-# ------------------ Utilities ------------------
-GENERIC_WORDS = {
-    "this", "that", "which", "these", "those", "something", "someone",
-    "anyone", "anything", "everything", "nothing", "introduction", "overview",
-    "system", "method", "process", "types", "application", "uses", "concept"
+_GENERIC = {
+    "introduction","overview","system","method","methods","process","processes",
+    "concept","types","factors","steps","advantages","disadvantages","merits","demerits",
+    "importance","role","effect","effects","impact","principles","principle","purpose",
+    "function","functions","components","parameters","features","example","examples"
 }
 
-EXPECTED_COLUMNS = [
-    "Question", "Unit", "Subunit", "Marks", "Answer", "Teacher ID", "Tag", "CO"
-]
-
-ALT_COLUMN_MAP = {
-    # lowercase -> canonical
-    "q": "Question",
-    "question text": "Question",
-    "unit no": "Unit",
-    "unit number": "Unit",
-    "sub-unit": "Subunit",
-    "sub unit": "Subunit",
-    "mark": "Marks",
-    "teacher": "Teacher ID",
-    "teacherid": "Teacher ID",
-    "teacher_id": "Teacher ID",
-    "course outcome": "CO",
-}
+# Regex helpers
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]*")
+_SPLIT = re.compile(r"[\s,;:/\\()\[\]{}<>]+")
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    mapping = {}
-    for col in df.columns:
-        key = col.strip().lower()
-        canonical = ALT_COLUMN_MAP.get(key, None)
-        mapping[col] = canonical if canonical else next(
-            (std for std in EXPECTED_COLUMNS if std.lower() == key), col
-        )
-    df = df.rename(columns=mapping)
-    # Ensure all expected columns exist
-    for col in EXPECTED_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    return df
-
-
-# ------------------ Keyword Extraction ------------------
-def _strip_edge_stopwords(tokens):
-    if not tokens:
-        return []
-    # Remove leading/trailing stopwords
+def _strip_edge_stops(tokens: List[str]) -> List[str]:
     i, j = 0, len(tokens) - 1
-    while i <= j and tokens[i].is_stop:
+    while i <= j and (tokens[i].lower() in _STOP or len(tokens[i]) <= 1):
         i += 1
-    while j >= i and tokens[j].is_stop:
+    while j >= i and (tokens[j].lower() in _STOP or len(tokens[j]) <= 1):
         j -= 1
     return tokens[i:j+1]
 
 
-def extract_keywords_spacy(question: str) -> list:
-    doc = nlp(question)
-    seen = set()
-    keywords = []
+def _clean_phrase(tokens: List[str]) -> str:
+    toks = _strip_edge_stops(tokens)
+    if not toks:
+        return ""
+    text = " ".join(toks)
+    # drop too generic
+    if text.lower() in _GENERIC:
+        return ""
+    # reject if looks like a verb directive only
+    if len(toks) == 1 and toks[0].lower() in _STOP:
+        return ""
+    return text.lower()
 
-    # Prefer multi-word noun chunks
+# ---------------- spaCy path -----------------
+
+def _candidates_spacy(text: str) -> List[str]:
+    if not _NLP:
+        return []
+    doc = _NLP(text)
+    cands: List[str] = []
+
+    # 1) Noun chunks
     for chunk in doc.noun_chunks:
-        # Clean tokens: letters/digits, no punctuation
-        tokens = [t for t in chunk if (t.is_alpha or t.is_digit)]
-        tokens = _strip_edge_stopwords(tokens)
-        if not tokens:
-            continue
-        text = " ".join(t.text.lower() for t in tokens)
-        # length control and filters
-        if 1 <= len(tokens) <= 5 and len(text) > 3 and text not in GENERIC_WORDS:
-            if text not in seen:
-                seen.add(text)
-                keywords.append(text)
-        if len(keywords) >= 3:
-            break
+        toks = [t.text for t in chunk if (t.is_alpha or t.is_digit or '-' in t.text)]
+        toks = _strip_edge_stops(toks)
+        if 2 <= len(toks) <= 6:
+            ph = _clean_phrase(toks)
+            if ph:
+                cands.append(ph)
 
-    # Fallback to longest meaningful single words
-    if len(keywords) < 1:
-        words = [t.text.lower() for t in doc if t.is_alpha and not t.is_stop]
-        words = sorted(set(words), key=len, reverse=True)
-        for w in words:
-            if w not in GENERIC_WORDS:
-                keywords.append(w)
-            if len(keywords) >= 3:
+    # 2) Named entities (ORG/PRODUCT/WORK_OF_ART/EVENT etc.) as phrases
+    for ent in doc.ents:
+        if ent.label_ in {"ORG","PRODUCT","WORK_OF_ART","EVENT","FAC","GPE","LAW"}:
+            toks = [t.text for t in ent if (t.is_alpha or t.is_digit or '-' in t.text)]
+            ph = _clean_phrase(toks)
+            if ph:
+                cands.append(ph)
+
+    # Uniques, preserve order
+    seen, result = set(), []
+    for ph in cands:
+        if ph not in seen:
+            seen.add(ph); result.append(ph)
+    return result
+
+# --------------- Heuristic RAKE-like path ---------------
+
+def _candidates_rake(text: str) -> List[str]:
+    tokens = [t for t in _WORD.findall(text)]
+    # split into chunks on stopwords
+    chunks: List[List[str]] = []
+    cur: List[str] = []
+    for t in tokens:
+        if t.lower() in _STOP:
+            if cur:
+                chunks.append(cur); cur = []
+        else:
+            cur.append(t)
+    if cur:
+        chunks.append(cur)
+
+    # score by degree/frequency
+    freq = {}
+    deg = {}
+    for ch in chunks:
+        for w in ch:
+            lw = w.lower()
+            freq[lw] = freq.get(lw, 0) + 1
+            deg[lw] = deg.get(lw, 0) + (len(ch) - 1)
+    scores = {w: (deg[w] + freq[w]) / float(freq[w]) for w in freq}
+
+    # candidate phrases 2–6 tokens with score
+    cand_scored: List[Tuple[float,str]] = []
+    for ch in chunks:
+        if 2 <= len(ch) <= 6:
+            ph = _clean_phrase([w.lower() for w in ch])
+            if not ph:
+                continue
+            s = sum(scores.get(w.lower(), 1.0) for w in ch)
+            cand_scored.append((s, ph))
+
+    # sort by score desc then length desc
+    cand_scored.sort(key=lambda x: (-x[0], -len(x[1])))
+
+    # unique preserve order
+    seen, result = set(), []
+    for _, ph in cand_scored:
+        if ph not in seen:
+            seen.add(ph); result.append(ph)
+    return result
+
+# --------------- Public API ---------------
+
+def extract_keywords(text: str, max_keywords: int = 3) -> List[str]:
+    """Extract up to `max_keywords` multi-word keywords from a question string.
+    Works for any domain. Returns lowercased phrases.
+    """
+    if not text or not text.strip():
+        return []
+
+    # 1) Try spaCy candidates
+    phrases = _candidates_spacy(text)
+
+    # 2) If not enough, add heuristic phrases
+    if len(phrases) < max_keywords:
+        extra = _candidates_rake(text)
+        # merge while preserving order and uniqueness
+        seen = set(phrases)
+        for ph in extra:
+            if ph not in seen:
+                phrases.append(ph); seen.add(ph)
+            if len(phrases) >= max_keywords:
                 break
 
-    return keywords[:3]
+    # 3) If STILL empty, fallback to best bigrams from tokens
+    if not phrases:
+        tokens = [w.lower() for w in _WORD.findall(text) if w.lower() not in _STOP]
+        for n in (3, 2):
+            for i in range(0, max(0, len(tokens) - n + 1)):
+                cand = " ".join(tokens[i:i+n])
+                if len(cand) >= 4 and cand not in _GENERIC:
+                    phrases.append(cand)
+                    if len(phrases) >= max_keywords:
+                        break
+            if phrases:
+                break
 
+    return phrases[:max_keywords]
 
-def extract_keywords_fallback(question: str) -> list:
-    # Simple fallback: top 3 longest words (non-stop) using a basic list
-    words = re.findall(r"[A-Za-z]{3,}", question.lower())
-    # very small stoplist
-    stop = {"the","and","for","with","from","into","onto","about","into","using","use","uses",
-            "this","that","which","these","those","such","their","your","our","its","are","is",
-            "in","on","to","of","by","as","at"}
-    words = [w for w in words if w not in stop and w not in GENERIC_WORDS]
-    words = sorted(set(words), key=len, reverse=True)
-    return words[:3] if words else ["general"]
-
-
-def extract_keywords_from_question(question: str) -> str:
-    try:
-        if nlp is not None:
-            kws = extract_keywords_spacy(question)
-        else:
-            kws = extract_keywords_fallback(question)
-    except Exception:
-        kws = extract_keywords_fallback(question)
-    return ", ".join(kws) if kws else "General"
-
-
-# ------------------ Bloom's Taxonomy ------------------
-def detect_bloom_level(question: str) -> str:
-    q = question.lower()
-    bloom_keywords = {
-        "L1": ["define", "list", "name", "state", "identify", "recall"],
-        "L2": ["explain", "describe", "summarize", "classify", "outline"],
-        "L3": ["solve", "use", "demonstrate", "compute", "apply"],
-        "L4": ["compare", "differentiate", "analyze", "distinguish", "examine"],
-        "L5": ["justify", "evaluate", "assess", "argue", "critique"],
-        "L6": ["design", "develop", "formulate", "construct", "create"],
-    }
-    for level, verbs in bloom_keywords.items():
-        for verb in verbs:
-            if re.search(rf"\b{re.escape(verb)}\b", q):
-                return level
-    return "L2"
-
-
-def assign_difficulty(bloom_level: str) -> str:
-    return {
-        "L1": "Low",
-        "L2": "Low",
-        "L3": "Medium",
-        "L4": "Medium",
-        "L5": "High",
-        "L6": "High",
-    }.get(bloom_level, "Medium")
-
-
-def classify_question_type(question: str) -> str:
-    return (
-        "P" if any(w in question.lower() for w in ["calculate", "solve", "determine", "find", "compute"]) else "T"
-    )
-
-
-# ------------------ Unit Mapping from DOCX ------------------
-def read_unit_mapping_from_docx(docx_file) -> dict:
-    unit_mapping = {}
-    doc = Document(docx_file)
-
-    # Parse plain paragraphs like: "1 Introduction to XYZ"
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        m = re.match(r"^(\d+)\s+(.+)$", text)
-        if m:
-            unit_no, unit_name = m.groups()
-            unit_mapping[unit_no.strip()] = unit_name.strip()
-
-    # Parse simple 2-column tables (Unit No | Title)
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            if len(row.cells) >= 2:
-                left = row.cells[0].text.strip()
-                right = row.cells[1].text.strip()
-                if re.fullmatch(r"\d+", left) and right:
-                    unit_mapping[left] = right
-    return unit_mapping
-
-
-# ------------------ DOCX Helpers ------------------
-def set_cell_text(cell, text: str, bold: bool = False, font_name: str = "Calibri", font_size_pt: int = 11):
-    # Clear existing content
-    cell.text = ""
-    p = cell.paragraphs[0]
-    run = p.add_run(str(text))
-    run.bold = bold
-    font = run.font
-    font.name = font_name
-    font.size = Pt(font_size_pt)
-
-
-def add_kv_row(table, label, value, bold_value=False):
-    row_cells = table.add_row().cells
-    set_cell_text(row_cells[0], label, bold=False)
-    set_cell_text(row_cells[1], value, bold=bold_value)
-
-
-def generate_question_bank_docx(df: pd.DataFrame, unit_mapping: dict, output_stream: io.BytesIO, bold_keywords: bool = False, show_single_char_difficulty: bool = False):
-    df = df.copy()
-    df.fillna("", inplace=True)
-
-    doc = Document()
-
-    for index, row in df.iterrows():
-        qno = index + 1
-        question = str(row.get("Question", "")).strip()
-        unit = str(row.get("Unit", "")).strip()
-        subunit = str(row.get("Subunit", "")).strip()
-        marks = str(row.get("Marks", "")).strip()
-        answer = str(row.get("Answer", "")).strip()
-        teacher_id = str(row.get("Teacher ID", "")).strip()
-        tag = str(row.get("Tag", "")).strip()
-        co = str(row.get("CO", "")).strip() or "CO1"
-
-        bloom = detect_bloom_level(question)
-        difficulty = assign_difficulty(bloom)
-        qtype = classify_question_type(question)
-        keyword_str = extract_keywords_from_question(question)
-
-        unit_name = unit_mapping.get(unit, tag if tag else "[Unit name not found]")
-
-        table = doc.add_table(rows=0, cols=2)
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        table.style = "Table Grid"
-
-        add_kv_row(table, "Question No.", qno)
-        add_kv_row(table, "Question", question)
-        add_kv_row(table, "Unit", f"Unit {unit}")
-        add_kv_row(table, "Subunit", subunit)
-        add_kv_row(table, "Marks", marks)
-        diff_val = difficulty[0].upper() if show_single_char_difficulty else difficulty
-        add_kv_row(table, "Difficulty", diff_val)
-        add_kv_row(table, "Answer", answer)
-        add_kv_row(table, "Question Type", qtype)
-        add_kv_row(table, "Tag", unit_name)
-        add_kv_row(table, "Keywords", keyword_str, bold_value=bold_keywords)
-        add_kv_row(table, "Blooms Taxonomy", bloom)
-        add_kv_row(table, "Course Outcome", co)
-        add_kv_row(table, "Teacher ID", f"<{teacher_id}>")
-        add_kv_row(table, "Year", "<System updates>")
-        add_kv_row(table, "Year asked", "<System updates>")
-        add_kv_row(table, "Frequency", "<System updates>")
-
-        # Space between question records
-        doc.add_paragraph("")
-        doc.add_page_break()
-
-    doc.save(output_stream)
-
-
-# ------------------ Streamlit UI ------------------
-def streamlit_ui():
-    st.title("📚 Question Bank Generator — DOCX with Multi-word Keywords")
-
-    status = "spaCy model loaded ✅" if nlp is not None else "spaCy model NOT available ❌ (using fallback: longest words)"
-    st.caption(status)
-
-    st.write("Upload your Questions CSV. Optionally upload a Syllabus DOCX to map Unit numbers → Unit titles (used as Tag when Tag is empty).")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        qfile = st.file_uploader("Upload Questions CSV", type=["csv","xlsx","xls"])
-    with c2:
-        sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
-
-    bold_keywords = st.checkbox("Bold the extracted Keywords in the DOCX", value=True)
-    single_char_diff = st.checkbox("Show Difficulty as a single letter (L/M/H)", value=False)
-
-    if qfile is not None:
-        # Read CSV/Excel
-        try:
-            df = pd.read_csv(qfile)
-        except Exception:
-            qfile.seek(0)
-            df = pd.read_excel(qfile)
-        df = normalize_columns(df)
-
-        # Compute and preview keywords LIVE so you can verify
-        preview_df = df.copy()
-        preview_df["_Extracted Keywords"] = preview_df["Question"].astype(str).apply(extract_keywords_from_question)
-
-        st.subheader("Preview (first 12 rows with extracted keywords)")
-        st.dataframe(preview_df.head(12))
-
-        unit_map = {}
-        if sfile is not None:
-            try:
-                unit_map = read_unit_mapping_from_docx(sfile)
-                if unit_map:
-                    st.success(f"Loaded {len(unit_map)} unit mappings from syllabus file.")
-                else:
-                    st.info("No unit mappings detected in the syllabus file. We'll use Tag from CSV.")
-            except Exception as e:
-                st.warning(f"Couldn't read syllabus mapping: {e}")
-
-        if st.button("Generate Question Bank (.docx)"):
-            buffer = io.BytesIO()
-            generate_question_bank_docx(
-                df, unit_map, buffer, bold_keywords=bold_keywords, show_single_char_difficulty=single_char_diff
-            )
-            buffer.seek(0)
-            fname = f"QuestionBank_Output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-            st.download_button(
-                label="Download DOCX File",
-                data=buffer,
-                file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
-            if nlp is None:
-                st.error(
-                    "You're currently on the fallback keyword extractor. To get TRUE noun-phrase multi-word keywords, install spaCy model locally and rerun:
-
-"
-                    "pip install spacy
-"
-                    "python -m spacy download en_core_web_sm
-"
-                    "(If running on Streamlit Cloud, add these to your requirements.txt.)"
-                )
 
 if __name__ == "__main__":
-    streamlit_ui()
+    tests = [
+        "Define 'free available chlorine' and 'chlorine demand' in the context of water treatment.",
+        "Briefly describe the concept of breakpoint chlorination.",
+        "Demonstrate how reverse osmosis can be used to desalinate brackish water.",
+        "Explain the working of a cyclone separator for air pollution control.",
+        "What are convolutional neural networks and how are they trained?",
+        "Design a reinforced concrete beam for a 6 m span with service loads.",
+        "Compare IPv4 and IPv6 addressing schemes with examples.",
+    ]
+    for t in tests:
+        print(t)
+        print(" → ", extract_keywords(t))
+        print()
