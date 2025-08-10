@@ -5,7 +5,15 @@ from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import streamlit as st
 from docx import Document as DocxDocument
-from sklearn.feature_extraction.text import TfidfVectorizer
+import spacy
+
+# ------------------ Load spaCy model ------------------
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    import subprocess
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
 
 # ------------------ Helper Functions ------------------
 
@@ -38,33 +46,34 @@ def assign_difficulty(bloom_level):
 def classify_question_type(question):
     return "P" if any(word in question.lower() for word in ["calculate", "solve", "determine", "find"]) else "T"
 
-def extract_keywords_tfidf(all_questions, idx):
-    """Extract top 1–3 word technical keyword/phrase from question using TF-IDF."""
-    stopwords = {"define", "explain", "describe", "summarize", "calculate", "solve", "determine",
-                 "find", "list", "name", "state", "using", "with", "from", "into", "which",
-                 "that", "this", "about", "and", "for", "the", "a", "an", "by", "on", "in"}
+def extract_keyword(question):
+    """
+    Extracts important 1-3 word technical phrases from the question.
+    """
+    doc = nlp(question)
+    technical_phrases = []
 
-    vectorizer = TfidfVectorizer(
-        ngram_range=(1, 3),
-        stop_words='english',
-        token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b',
-        max_features=5000
-    )
-    X = vectorizer.fit_transform(all_questions)
-    feature_names = vectorizer.get_feature_names_out()
-    row = X[idx]
-    if row.nnz == 0:
+    for chunk in doc.noun_chunks:
+        phrase = chunk.text.strip().lower()
+        # Remove very short or generic words
+        if len(phrase) > 3 and not re.match(r'^(what|which|that|this|these|those|its|their|his|her)$', phrase):
+            # Keep up to 3 words in the phrase
+            words = phrase.split()
+            if 1 <= len(words) <= 3:
+                technical_phrases.append(phrase)
+
+    # If we have phrases, return the longest one, else fallback
+    if technical_phrases:
+        # Remove duplicates while keeping order
+        seen = set()
+        unique_phrases = []
+        for p in technical_phrases:
+            if p not in seen:
+                seen.add(p)
+                unique_phrases.append(p)
+        return ", ".join(unique_phrases[:2])  # return up to 2 phrases
+    else:
         return "General"
-
-    tuples = list(zip(row.indices, row.data))
-    tuples.sort(key=lambda x: -x[1])  # Sort by score
-
-    for idx_feature, score in tuples:
-        candidate = feature_names[idx_feature]
-        words = candidate.split()
-        if any(len(w) >= 4 for w in words) and all(w.lower() not in stopwords for w in words):
-            return candidate  # Best technical phrase
-    return "General"
 
 def read_unit_mapping_from_docx(docx_path):
     unit_mapping = {}
@@ -82,8 +91,6 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
     df.fillna("", inplace=True)
     doc = Document()
 
-    all_questions = df["Question"].astype(str).tolist()
-
     for index, row in df.iterrows():
         qno = index + 1
         question = str(row.get("Question", ""))
@@ -98,7 +105,7 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
         bloom = detect_bloom_level(question)
         difficulty = assign_difficulty(bloom)
         qtype = classify_question_type(question)
-        keyword = extract_keywords_tfidf(all_questions, index)  # Improved keyword extraction
+        keyword = extract_keyword(question)  # now multi-word technical terms
 
         unit_name = tag if tag else unit_mapping.get(unit.strip(), "[Unit name not found]")
 
@@ -140,7 +147,7 @@ def generate_question_bank_docx(df, unit_mapping, output_path):
 
 # ------------------ Streamlit UI ------------------
 def streamlit_ui():
-    st.title("📚 Question Bank Generator - DOCX (Improved Keywords)")
+    st.title("📚 Question Bank Generator - DOCX (Multi-word Keywords)")
 
     qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
     sfile = st.file_uploader("Upload Syllabus DOCX (optional)", type=["docx"])
