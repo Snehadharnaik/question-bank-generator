@@ -8,3 +8,21 @@ python-docx
 pandas
 spacy
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+pip==24.2
+setuptools>=68
+wheel
+
+streamlit==1.36.0
+python-docx==1.1.2
+pandas==2.2.2
+
+# spaCy stack (pins to avoid cloud build issues)
+spacy==3.7.4
+thinc==8.2.3
+pydantic<2
+srsly<3.0.0
+catalogue<2.1.0
+numpy<2.0.0
+
+# English model wheel (small)
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
