@@ -13,6 +13,8 @@ VERSION = "KWv3-2025-08-10"  # shows in UI so you can confirm it's live
 try:
     import spacy
     try:
+        _NLP = None  # force fallback extractor on Streamlit Cloud
+
         _NLP = spacy.load("en_core_web_sm")
     except Exception:
         _NLP = None
