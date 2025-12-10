@@ -194,7 +194,7 @@ def classify_question_type(question):
 st.title("📚 Question Bank — Multi‑word Keyword Extractor + DOCX")
 st.caption(f"App version: {VERSION} • spaCy: {'ON' if _NLP else 'OFF'}")
 
-qfile = st.file_uploader("Upload Questions CSV", type=["csv","xlsx","xls"])
+qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
 bold_kw = st.checkbox("Bold Keywords in DOCX", value=True)
 diff_letter = st.checkbox("Show Difficulty as single letter (L/M/H)", value=False)
 
