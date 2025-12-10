@@ -198,13 +198,13 @@ qfile = st.file_uploader("Upload Questions CSV", type=["csv"])
 bold_kw = st.checkbox("Bold Keywords in DOCX", value=True)
 diff_letter = st.checkbox("Show Difficulty as single letter (L/M/H)", value=False)
 
-if qfile:
-    # read CSV/Excel
+if qfile is not None:
+    # force CSV reading only
     try:
         df = pd.read_csv(qfile)
-    except Exception:
-        qfile.seek(0)
-        df = pd.read_excel(qfile)
+    except Exception as e:
+        st.error(f"Could not read CSV file: {e}")
+        st.stop()
     if "Question" not in df.columns:
         st.error("CSV must have a 'Question' column")
     else:
